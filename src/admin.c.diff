@@ -1,11 +1,13 @@
 diff --git a/src/admin.c b/src/admin.c
-index b10c333..3bfd2ba 100644
+index 5cdb96f..235b693 100644
 --- a/src/admin.c
 +++ b/src/admin.c
-@@ -1147,6 +1147,7 @@ static bool admin_cmd_reload(PgSocket *admin, const char *arg)
-	load_config();
-	if (!sbuf_tls_setup())
+@@ -938,6 +938,8 @@ static bool admin_cmd_reload(PgSocket *admin, const char *arg)
  		log_error("TLS configuration could not be reloaded, keeping old configuration");
+ 	}
+ 
 +	run_once_to_init();
-	return admin_ready(admin, "RELOAD");
- }
++
+ 	if (ok)
+ 		return admin_ready(admin, "RELOAD");
+ 	else

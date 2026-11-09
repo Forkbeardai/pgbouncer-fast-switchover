@@ -1,8 +1,8 @@
 diff --git a/doc/config.md b/doc/config.md
-index 70c720f..eb0b279 100644
+index 70c3fbb..2cc9aa0 100644
 --- a/doc/config.md
 +++ b/doc/config.md
-@@ -131,6 +131,35 @@ the per-database configuration.
+@@ -129,6 +129,35 @@ The maximum number of server connections to allow per user/database pair. Can be
  
  Default: 20
  
@@ -38,7 +38,7 @@ index 70c720f..eb0b279 100644
  ### min_pool_size
  
  Add more server connections to pool if below this number.
-@@ -1257,6 +1286,13 @@ Query to be executed after a connection is established, but before
+@@ -1390,6 +1419,13 @@ Query to be executed after a connection is established, but before
  allowing the connection to be used by any clients. If the query raises errors,
  they are logged but ignored otherwise.
  

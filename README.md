@@ -219,10 +219,10 @@ Download and install pgbouncer-fast-switchover by running the following commands
 # install required packages - see https://github.com/pgbouncer/pgbouncer#building
 sudo yum install libevent-devel openssl-devel python-devel libtool git patch make -y
 
-# download the latest tested pgbouncer distribution - 1.24
+# download the latest tested pgbouncer distribution - 1.26.1
 git clone https://github.com/pgbouncer/pgbouncer.git
 cd pgbouncer
-git checkout -b pgbouncer-1.24 tags/pgbouncer_1_24_1
+git checkout -b pgbouncer-1.26 tags/pgbouncer_1_26_1
 cd ..
 
 # download pgbouncer-fast-switchover extensions

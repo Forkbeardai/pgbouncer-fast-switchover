@@ -1,5 +1,5 @@
 diff --git a/src/util.c b/src/util.c
-index fad0172..d609ba6 100644
+index b280a7e..d60476a 100644
 --- a/src/util.c
 +++ b/src/util.c
 @@ -32,6 +32,33 @@
@@ -36,7 +36,7 @@ index fad0172..d609ba6 100644
  int log_socket_prefix(enum LogLevel lev, void *ctx, char *dst, unsigned int dstlen)
  {
  	const struct PgSocket *sock = ctx;
-@@ -532,3 +559,221 @@ bool check_reserved_database(const char *value)
+@@ -539,3 +566,221 @@ bool check_reserved_database(const char *value)
  	}
  	return true;
  }

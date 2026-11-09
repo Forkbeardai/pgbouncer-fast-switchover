@@ -1,25 +1,44 @@
 diff --git a/src/client.c b/src/client.c
-index fcf7b3b..9cf3b86 100644
+index 7446f70..d9bb516 100644
 --- a/src/client.c
 +++ b/src/client.c
-@@ -1291,7 +1291,7 @@ static bool handle_client_startup(PgSocket *client, PktHdr *pkt)
- 			return false;
- 		}
+@@ -529,6 +529,27 @@ static bool check_if_need_ldap_authentication(PgSocket *client, const char *dbna
+ }
+ #endif
  
--		if (client->pool && !sending_auth_query(client)) {
-+		if (client->pool && !sending_auth_query(client) && !get_global_writer(client->pool)) {
- 			disconnect_client(client, true, "client re-sent startup pkt");
- 			return false;
- 		}
-@@ -1428,6 +1428,7 @@ static bool handle_client_work(PgSocket *client, PktHdr *pkt)
-	int track_outstanding = false;
-	PreparedStatementAction ps_action = PS_IGNORE;
-	PgClosePacket close_packet;
++/*
++ * fast-switchover: move an already-authenticated client to another pool.
++ * Replaces the set_pool(..., takeover=true) path removed in pgbouncer 1.26.
++ */
++bool switchover_set_pool(PgSocket *client, const char *dbname)
++{
++	PgDatabase *db = find_database(dbname);
++	PgCredentials *creds;
++	PgPool *pool;
++
++	if (!db || !client->login_user_credentials)
++		return false;
++	creds = db->forced_user_credentials ? db->forced_user_credentials : client->login_user_credentials;
++	pool = get_pool(db, creds);
++	if (!pool)
++		return false;
++	client->db = db;
++	client->pool = pool;
++	return true;
++}
++
+ bool set_pool(PgSocket *client, const char *dbname, const char *username)
+ {
+ 	/* find database */
+@@ -1459,6 +1480,7 @@ static bool handle_client_work(PgSocket *client, PktHdr *pkt)
+ 	int track_outstanding = false;
+ 	PreparedStatementAction ps_action = PS_IGNORE;
+ 	PgClosePacket close_packet;
 +	bool in_transaction = false;
  
  	switch (pkt->type) {
-	/* one-packet queries */
-@@ -1591,8 +1592,11 @@ static bool handle_client_work(PgSocket *client, PktHdr *pkt)
+ 	/* one-packet queries */
+@@ -1642,8 +1664,11 @@ static bool handle_client_work(PgSocket *client, PktHdr *pkt)
  		client->query_start = get_cached_time();
  	}
  
@@ -32,7 +51,7 @@ index fcf7b3b..9cf3b86 100644
  		client->pool->stats.xact_count++;
  		client->xact_start = client->query_start;
  	}
-@@ -1600,6 +1604,14 @@ static bool handle_client_work(PgSocket *client, PktHdr *pkt)
+@@ -1651,6 +1676,14 @@ static bool handle_client_work(PgSocket *client, PktHdr *pkt)
  	if (client->pool->db->admin)
  		return admin_handle_client(client, pkt);
  

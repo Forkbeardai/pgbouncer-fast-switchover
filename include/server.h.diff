@@ -1,5 +1,5 @@
 diff --git a/include/server.h b/include/server.h
-index e500b11..db428f4 100644
+index 2b0ce8f..7cc6428 100644
 --- a/include/server.h
 +++ b/include/server.h
 @@ -16,6 +16,13 @@
