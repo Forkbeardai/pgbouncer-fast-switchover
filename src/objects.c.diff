@@ -1,5 +1,5 @@
 diff --git a/src/objects.c b/src/objects.c
-index 666c72d..58d97c6 100644
+index 666c72d..34eb5fd 100644
 --- a/src/objects.c
 +++ b/src/objects.c
 @@ -777,14 +777,20 @@ PgPool *get_pool(PgDatabase *db, PgCredentials *user_credentials)
@@ -47,7 +47,7 @@ index 666c72d..58d97c6 100644
  	if (client->db->fake) {
  		if (cf_log_connections)
  			slog_info(client, "login failed: db=%s user=%s", client->db->name, client->login_user_credentials->name);
-@@ -2064,6 +2079,21 @@ bool finish_client_login(PgSocket *client)
+@@ -2064,6 +2079,22 @@ bool finish_client_login(PgSocket *client)
  
  	switch (client->state) {
  	case CL_LOGIN:
@@ -61,6 +61,7 @@ index 666c72d..58d97c6 100644
 +			log_debug("finish_client_login: global writer is set, so let's use the cached value: %s", global_writer->db->name);
 +			if (client->pool != global_writer && !switchover_set_pool(client, global_writer->db->name)) {
 +				log_error("could not set pool to: %s", global_writer->db->name);
++				disconnect_client(client, true, "could not assign writer pool");
 +				return false;
 +			}
 +		} else {

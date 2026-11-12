@@ -1,8 +1,8 @@
 diff --git a/src/client.c b/src/client.c
-index 7446f70..d9bb516 100644
+index 7446f70..6267f33 100644
 --- a/src/client.c
 +++ b/src/client.c
-@@ -529,6 +529,27 @@ static bool check_if_need_ldap_authentication(PgSocket *client, const char *dbna
+@@ -529,6 +529,32 @@ static bool check_if_need_ldap_authentication(PgSocket *client, const char *dbna
  }
  #endif
  
@@ -22,6 +22,11 @@ index 7446f70..d9bb516 100644
 +	pool = get_pool(db, creds);
 +	if (!pool)
 +		return false;
++	/* disconnect_client() decrements client->db, so move the count with the client */
++	if (client->db != db && client->contributes_db_client_count) {
++		client->db->client_connection_count--;
++		db->client_connection_count++;
++	}
 +	client->db = db;
 +	client->pool = pool;
 +	return true;
@@ -30,7 +35,7 @@ index 7446f70..d9bb516 100644
  bool set_pool(PgSocket *client, const char *dbname, const char *username)
  {
  	/* find database */
-@@ -1459,6 +1480,7 @@ static bool handle_client_work(PgSocket *client, PktHdr *pkt)
+@@ -1459,6 +1485,7 @@ static bool handle_client_work(PgSocket *client, PktHdr *pkt)
  	int track_outstanding = false;
  	PreparedStatementAction ps_action = PS_IGNORE;
  	PgClosePacket close_packet;
@@ -38,7 +43,7 @@ index 7446f70..d9bb516 100644
  
  	switch (pkt->type) {
  	/* one-packet queries */
-@@ -1642,8 +1664,11 @@ static bool handle_client_work(PgSocket *client, PktHdr *pkt)
+@@ -1642,8 +1669,11 @@ static bool handle_client_work(PgSocket *client, PktHdr *pkt)
  		client->query_start = get_cached_time();
  	}
  
@@ -51,7 +56,7 @@ index 7446f70..d9bb516 100644
  		client->pool->stats.xact_count++;
  		client->xact_start = client->query_start;
  	}
-@@ -1651,6 +1676,14 @@ static bool handle_client_work(PgSocket *client, PktHdr *pkt)
+@@ -1651,6 +1681,14 @@ static bool handle_client_work(PgSocket *client, PktHdr *pkt)
  	if (client->pool->db->admin)
  		return admin_handle_client(client, pkt);
  

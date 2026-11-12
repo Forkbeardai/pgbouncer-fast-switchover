@@ -1,5 +1,5 @@
 diff --git a/src/janitor.c b/src/janitor.c
-index 4445c66..fe00d48 100644
+index 4445c66..750aa12 100644
 --- a/src/janitor.c
 +++ b/src/janitor.c
 @@ -24,9 +24,16 @@
@@ -19,20 +19,15 @@ index 4445c66..fe00d48 100644
  extern bool any_user_level_server_timeout_set;
  extern bool any_user_level_client_timeout_set;
  
-@@ -53,21 +60,159 @@ static void close_client_list(struct StatList *sk_list, const char *reason)
+@@ -53,21 +60,154 @@ static void close_client_list(struct StatList *sk_list, const char *reason)
  	}
  }
  
 +static bool update_client_pool(PgSocket *client, PgPool *new_pool)
 +{
-+	char *username = NULL;
-+	char *passwd = NULL;
-+
 +	if (client->pool == new_pool)
 +		return true;
 +
-+	username = client->login_user_credentials->name;
-+	passwd = client->login_user_credentials->passwd;
 +	if (!switchover_set_pool(client, new_pool->db->name)) {
 +		log_error("could not set pool to: %s", new_pool->db->name);
 +		return false;
@@ -185,7 +180,7 @@ index 4445c66..fe00d48 100644
  		if (server->ready)
  			break;
  		disconnect_server(server, true, "idle server got dirty");
-@@ -82,6 +227,36 @@ static void launch_recheck(PgPool *pool)
+@@ -82,6 +222,36 @@ static void launch_recheck(PgPool *pool)
  			need_check = false;
  	}
  
@@ -222,7 +217,7 @@ index 4445c66..fe00d48 100644
  	if (need_check) {
  		/* send test query, wait for result */
  		slog_debug(server, "P: checking: %s", q);
-@@ -161,11 +336,26 @@ static void per_loop_activate(PgPool *pool)
+@@ -161,11 +331,26 @@ static void per_loop_activate(PgPool *pool)
  			--sv_tested;
  		} else if (sv_used > 0) {
  			/* ask for more connections to be tested */
@@ -251,7 +246,7 @@ index 4445c66..fe00d48 100644
  			break;
  		}
  	}
-@@ -229,9 +419,74 @@ static int per_loop_wait_close(PgPool *pool)
+@@ -229,9 +414,74 @@ static int per_loop_wait_close(PgPool *pool)
  }
  
  /*
@@ -328,7 +323,7 @@ index 4445c66..fe00d48 100644
  {
  	struct List *item;
  	PgPool *pool;
-@@ -239,18 +494,54 @@ void per_loop_maint(void)
+@@ -239,18 +489,54 @@ void per_loop_maint(void)
  	int waiting_count = 0;
  	bool partial_pause = false;
  	bool partial_wait = false;
@@ -384,7 +379,7 @@ index 4445c66..fe00d48 100644
  			}
  			break;
  		case P_PAUSE:
-@@ -264,6 +555,15 @@ void per_loop_maint(void)
+@@ -264,6 +550,15 @@ void per_loop_maint(void)
  		}
  	}
  
@@ -400,7 +395,7 @@ index 4445c66..fe00d48 100644
  	switch (cf_pause_mode) {
  	case P_PAUSE:
  		if (!active_count)
-@@ -279,6 +579,174 @@ void per_loop_maint(void)
+@@ -279,6 +574,174 @@ void per_loop_maint(void)
  		admin_wait_close_done();
  }
  
@@ -575,7 +570,7 @@ index 4445c66..fe00d48 100644
  /* maintaining clients in pool */
  static void pool_client_maint(PgPool *pool)
  {
-@@ -414,6 +882,7 @@ static void check_unused_servers(PgPool *pool, struct StatList *slist, bool idle
+@@ -414,6 +877,7 @@ static void check_unused_servers(PgPool *pool, struct StatList *slist, bool idle
  		} else if (server->state == SV_USED && !server->ready) {
  			disconnect_server(server, true, "SV_USED server got dirty");
  		} else if (cf_server_idle_timeout > 0 && idle > cf_server_idle_timeout
@@ -583,7 +578,51 @@ index 4445c66..fe00d48 100644
  			   && (pool_min_pool_size(pool) == 0 || pool_connected_server_count(pool) > pool_min_pool_size(pool))) {
  			disconnect_server(server, true, "server idle timeout");
  		} else if (age >= server_lifetime) {
-@@ -850,6 +1319,8 @@ void kill_database(PgDatabase *db)
+@@ -785,10 +1249,43 @@ void janitor_setup(void)
+ 		log_warning("event_add failed: %s", strerror(errno));
+ }
+ 
++/*
++ * fast-switchover: other pools can point at this one via global_writer or
++ * parent_pool, and the janitor can repoint a waiting client at it while the
++ * client stays linked in another pool's waiting list. Drop those references
++ * before the pool is freed (e.g. RELOAD kills child pools not in the ini).
++ */
++static void forget_switchover_pool(PgPool *dead)
++{
++	struct List *item, *citem, *ctmp;
++	PgPool *pool;
++	PgSocket *client;
++
++	statlist_for_each(item, &pool_list) {
++		pool = container_of(item, PgPool, head);
++		if (pool == dead)
++			continue;
++		if (pool->global_writer == dead)
++			pool->global_writer = NULL;
++		if (pool->parent_pool == dead)
++			pool->parent_pool = NULL;
++		statlist_for_each_safe(citem, &pool->waiting_client_list, ctmp) {
++			client = container_of(citem, PgSocket, head);
++			if (client->pool != dead)
++				continue;
++			/* unlink from the list it is actually in */
++			client->pool = pool;
++			disconnect_client(client, true, "database removed");
++		}
++	}
++}
++
+ void kill_pool(PgPool *pool)
+ {
+ 	const char *reason = "database removed";
+ 
++	forget_switchover_pool(pool);
++
+ 	close_client_list(&pool->active_client_list, reason);
+ 	close_client_list(&pool->waiting_client_list, reason);
+ 
+@@ -850,6 +1347,8 @@ void kill_database(PgDatabase *db)
  	if (db->forced_user_credentials)
  		slab_free(credentials_cache, db->forced_user_credentials);
  	free(db->connect_query);

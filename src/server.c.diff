@@ -1,5 +1,5 @@
 diff --git a/src/server.c b/src/server.c
-index 5abbc98..39841f8 100644
+index 5abbc98..4014736 100644
 --- a/src/server.c
 +++ b/src/server.c
 @@ -27,6 +27,125 @@
@@ -552,11 +552,9 @@ index 5abbc98..39841f8 100644
  /* process packets on logged in connection */
  static bool handle_server_work(PgSocket *server, PktHdr *pkt)
  {
-@@ -419,7 +889,15 @@ static bool handle_server_work(PgSocket *server, PktHdr *pkt)
- 	SBuf *sbuf = &server->sbuf;
+@@ -420,6 +890,13 @@ static bool handle_server_work(PgSocket *server, PktHdr *pkt)
  	PgSocket *client = server->link;
  	bool async_response = false;
-+	struct List *item, *tmp;
  	bool ignore_packet = false;
 +	bool res = false;
 +	PgPool *next_pool = NULL;
@@ -568,7 +566,7 @@ index 5abbc98..39841f8 100644
  
  	Assert(!server->pool->db->admin);
  
-@@ -431,6 +909,15 @@ static bool handle_server_work(PgSocket *server, PktHdr *pkt)
+@@ -431,6 +908,15 @@ static bool handle_server_work(PgSocket *server, PktHdr *pkt)
  
  	/* pooling decisions will be based on this packet */
  	case PqMsg_ReadyForQuery:
@@ -584,7 +582,7 @@ index 5abbc98..39841f8 100644
  
  		/* if partial pkt, wait */
  		if (!mbuf_get_char(&pkt->data, &state))
-@@ -518,6 +1005,39 @@ static bool handle_server_work(PgSocket *server, PktHdr *pkt)
+@@ -518,6 +1004,41 @@ static bool handle_server_work(PgSocket *server, PktHdr *pkt)
  		break;
  
  	case PqMsg_CommandComplete:
@@ -603,6 +601,8 @@ index 5abbc98..39841f8 100644
 +			log_debug("handle_server_work: switchover started retrying to get the state of Blue Green deployment, db_name: %s", server->pool->db->name);
 +			server->pool->checking_for_new_writer = false;
 +		} else if (fast_switchover && server->pool->db->is_topology_check_in_progress && is_topology_monitoring_job_enabled) {
++			struct List *item, *tmp;
++
 +			/*
 +			 * Topology query execution completed, but PqMsg_DataRow handler wasn't triggered.
 +			 * This means the topology query returned no results, indicating the
@@ -624,7 +624,7 @@ index 5abbc98..39841f8 100644
  		/* ErrorResponse and CommandComplete show end of copy mode */
  		if (server->copy_mode) {
  			slog_debug(server, "COPY finished");
-@@ -604,6 +1124,110 @@ static bool handle_server_work(PgSocket *server, PktHdr *pkt)
+@@ -604,6 +1125,110 @@ static bool handle_server_work(PgSocket *server, PktHdr *pkt)
  	/* data packets, there will be more coming */
  	case PqMsg_CopyData:
  	case PqMsg_DataRow:
@@ -735,7 +735,7 @@ index 5abbc98..39841f8 100644
  		break;
  	}
  	server->idle_tx = idle_tx;
-@@ -671,7 +1295,7 @@ static bool handle_server_work(PgSocket *server, PktHdr *pkt)
+@@ -671,7 +1296,7 @@ static bool handle_server_work(PgSocket *server, PktHdr *pkt)
  				return false;
  		}
  	} else {
@@ -744,7 +744,7 @@ index 5abbc98..39841f8 100644
  			slog_warning(server,
  				     "got packet '%c' from server when not linked",
  				     pkt_desc(pkt));
-@@ -679,6 +1303,19 @@ static bool handle_server_work(PgSocket *server, PktHdr *pkt)
+@@ -679,6 +1304,19 @@ static bool handle_server_work(PgSocket *server, PktHdr *pkt)
  		sbuf_prepare_skip(sbuf, pkt->len);
  	}
  
@@ -764,7 +764,7 @@ index 5abbc98..39841f8 100644
  	return true;
  }
  
-@@ -794,6 +1431,8 @@ bool server_proto(SBuf *sbuf, SBufEvent evtype, struct MBuf *data)
+@@ -794,6 +1432,8 @@ bool server_proto(SBuf *sbuf, SBufEvent evtype, struct MBuf *data)
  {
  	bool res = false;
  	PgSocket *server = container_of(sbuf, PgSocket, sbuf);
@@ -773,7 +773,7 @@ index 5abbc98..39841f8 100644
  	PktHdr pkt;
  	char infobuf[96];
  
-@@ -808,8 +1447,18 @@ bool server_proto(SBuf *sbuf, SBufEvent evtype, struct MBuf *data)
+@@ -808,8 +1448,18 @@ bool server_proto(SBuf *sbuf, SBufEvent evtype, struct MBuf *data)
  	case SBUF_EV_RECV_FAILED:
  		if (server->state == SV_ACTIVE_CANCEL)
  			disconnect_server(server, false, "successfully sent cancel request");
@@ -793,7 +793,7 @@ index 5abbc98..39841f8 100644
  		break;
  	case SBUF_EV_SEND_FAILED:
  		disconnect_client(server->link, false, "unexpected eof");
-@@ -850,6 +1499,10 @@ bool server_proto(SBuf *sbuf, SBufEvent evtype, struct MBuf *data)
+@@ -850,6 +1500,10 @@ bool server_proto(SBuf *sbuf, SBufEvent evtype, struct MBuf *data)
  		break;
  	case SBUF_EV_CONNECT_FAILED:
  		Assert(server->state == SV_LOGIN);
@@ -804,7 +804,7 @@ index 5abbc98..39841f8 100644
  		disconnect_server(server, false, "connect failed");
  		break;
  	case SBUF_EV_CONNECT_OK:
-@@ -943,3 +1596,289 @@ bool server_proto(SBuf *sbuf, SBufEvent evtype, struct MBuf *data)
+@@ -943,3 +1597,289 @@ bool server_proto(SBuf *sbuf, SBufEvent evtype, struct MBuf *data)
  	}
  	return res;
  }
