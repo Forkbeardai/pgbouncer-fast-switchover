@@ -1,8 +1,8 @@
 diff --git a/include/bouncer.h b/include/bouncer.h
-index d607ddc..39e4282 100644
+index 88ea46e..d3a1001 100644
 --- a/include/bouncer.h
 +++ b/include/bouncer.h
-@@ -144,6 +144,22 @@ enum LoadBalanceHosts {
+@@ -148,6 +148,22 @@ enum LoadBalanceHosts {
  	LOAD_BALANCE_HOSTS_ROUND_ROBIN
  };
  
@@ -25,7 +25,7 @@ index d607ddc..39e4282 100644
  #define is_server_socket(sk) ((sk)->state >= SV_FREE)
  
  
-@@ -162,9 +178,15 @@ typedef struct ScramState ScramState;
+@@ -166,9 +182,15 @@ typedef struct ScramState ScramState;
  typedef struct PgPreparedStatement PgPreparedStatement;
  typedef enum ResponseAction ResponseAction;
  typedef enum ReplicationType ReplicationType;
@@ -41,7 +41,7 @@ index d607ddc..39e4282 100644
  #include "util.h"
  #include "iobuf.h"
  #include "sbuf.h"
-@@ -302,6 +324,25 @@ const char *pga_str(const PgAddr *a, char *dst, int dstlen);
+@@ -319,6 +341,25 @@ const char *pga_str(const PgAddr *a, char *dst, int dstlen);
  const char *pga_details(const PgAddr *a, char *dst, int dstlen);
  int pga_cmp_addr(const PgAddr *a, const PgAddr *b);
  
@@ -67,41 +67,33 @@ index d607ddc..39e4282 100644
  /*
   * Stats, kept per-pool.
   */
-@@ -448,13 +489,33 @@ struct PgPool {
- 
+@@ -468,13 +509,25 @@ struct PgPool {
  	/* if last connect to server failed, there should be delay before next */
  	usec_t last_connect_time;
+ 	usec_t last_active_time;
 +	usec_t last_poll_time;
-+	usec_t last_failed_time; // last time the connection failed
++	usec_t last_failed_time;
  	bool last_connect_failed : 1;
  	char last_connect_failed_message[100];
  	bool last_login_failed : 1;
  
  	bool welcome_msg_ready : 1;
  
-+	bool recently_checked : 1; // should be set once checking starts. If all pools have this set, they need to be unset so we can loop again.
-+	bool initial_writer_endpoint : 1; // used to indicate a configured writer when starting PgBouncer. Used for getting the topology of the cluster associated with the writer.
-+	bool refresh_topology : 1; // after a new writer is found, indicate that we need to refresh the topology.
-+	/*
-+	 * Used to indicate that DataRow, CommandComplete, and ReadyForQuery should be discarded.
-+	 * This is for the case where the topology has to be refreshed, but the data should not be
-+	 * sent to the client.
-+	 *
-+	 * Once the ReadyForQuery is received, all topology data has been discarded and regular
-+	 * client server communications can resume.
-+	 */
++	bool recently_checked : 1;
++	bool initial_writer_endpoint : 1;
++	bool refresh_topology : 1;
 +	bool collect_datarows : 1;
-+	bool checking_for_new_writer : 1; // this is linked with server and client so we can communicate when polling is truly done. Used to only allow checking for one node a time.
++	bool checking_for_new_writer : 1;
 +
 +	uint16_t num_nodes;
 +
  	uint16_t rrcounter;		/* round-robin counter */
-+	PgPool *global_writer;	/* global_writer pool for this pool */;
++	PgPool *global_writer;	/* global_writer pool for this pool */
 +	PgPool *parent_pool;	/* the parent pool for setting the global writer */
  };
  
  /*
-@@ -564,6 +625,8 @@ struct PgDatabase {
+@@ -616,6 +669,8 @@ struct PgDatabase {
  	int max_db_connections;	/* max server connections between all pools */
  	usec_t server_lifetime;	/* max lifetime of server connection */
  	char *connect_query;	/* startup commands to send to server after connect */
@@ -110,7 +102,7 @@ index d607ddc..39e4282 100644
  	enum LoadBalanceHosts load_balance_hosts;	/* strategy for host selection in a comma-separated host list */
  
  	struct PktBuf *startup_params;	/* partial StartupMessage (without user) be sent to server */
-@@ -583,6 +646,9 @@ struct PgDatabase {
+@@ -635,6 +690,9 @@ struct PgDatabase {
  	bool db_disabled;	/* is the database accepting new connections? */
  	bool admin;		/* internal console db */
  	bool fake;		/* not a real database, only for mock auth */
@@ -120,7 +112,7 @@ index d607ddc..39e4282 100644
  	usec_t inactive_time;	/* when auto-database became inactive (to kill it after timeout) */
  	unsigned active_stamp;	/* set if autodb has connections */
  	int connection_count;	/* total connections for this database in all pools */
-@@ -767,7 +833,9 @@ extern int cf_peer_id;
+@@ -836,7 +894,9 @@ extern int cf_peer_id;
  extern int cf_pool_mode;
  extern int cf_max_client_conn;
  extern int cf_default_pool_size;
@@ -130,8 +122,8 @@ index d607ddc..39e4282 100644
  extern int cf_res_pool_size;
  extern usec_t cf_res_pool_timeout;
  extern int cf_max_db_connections;
-@@ -786,6 +854,8 @@ extern int cf_server_reset_query_always;
- extern char *cf_server_check_query;
+@@ -855,6 +915,8 @@ extern char *cf_server_check_query;
+ extern bool empty_server_check_query;
  extern usec_t cf_server_check_delay;
  extern int cf_server_fast_close;
 +extern usec_t cf_server_failed_delay;
@@ -139,7 +131,7 @@ index d607ddc..39e4282 100644
  extern usec_t cf_server_connect_timeout;
  extern usec_t cf_server_login_retry;
  extern usec_t cf_query_timeout;
-@@ -840,6 +910,11 @@ extern int cf_log_disconnections;
+@@ -912,6 +974,11 @@ extern int cf_log_disconnections;
  extern int cf_log_pooler_errors;
  extern int cf_application_name_add_host;
  

@@ -1,5 +1,5 @@
 diff --git a/include/objects.h b/include/objects.h
-index 0b498dd..1f014df 100644
+index c0d18a7..b05bcba 100644
 --- a/include/objects.h
 +++ b/include/objects.h
 @@ -37,6 +37,20 @@ extern struct Slab *outstanding_request_cache;
