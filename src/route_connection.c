@@ -34,6 +34,7 @@ bool route_client_connection(PgSocket *client, int in_transaction, PktHdr *pkt) 
 	char *dbname;
 	PgDatabase *db;
 	PgPool *pool;
+	PgCredentials *creds;
 
 	/* extract query string from packet */
 	/* first byte is the packet type (which we already know)
@@ -82,7 +83,14 @@ bool route_client_connection(PgSocket *client, int in_transaction, PktHdr *pkt) 
 		free(dbname);
 		return false;
 	}
-	pool = get_pool(db, client->login_user_credentials);
+	/*
+	 * Use the target database's user=/password= when it has one, as pgbouncer
+	 * does at login (see switchover_set_pool). Using the client's credentials
+	 * would log in to every backend with the auth_file password and ignore a
+	 * per-database password.
+	 */
+	creds = db->forced_user_credentials ? db->forced_user_credentials : client->login_user_credentials;
+	pool = get_pool(db, creds);
 	if (client->pool != pool) {
 		if (client->link != NULL) {
 			/* release existing server connection back to pool */
