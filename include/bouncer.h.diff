@@ -1,5 +1,5 @@
 diff --git a/include/bouncer.h b/include/bouncer.h
-index 88ea46e..627a729 100644
+index 88ea46e..3e32b09 100644
 --- a/include/bouncer.h
 +++ b/include/bouncer.h
 @@ -148,6 +148,22 @@ enum LoadBalanceHosts {
@@ -45,8 +45,8 @@ index 88ea46e..627a729 100644
   */
  #define MAX_USERNAME    128
  
-+/* pgbouncer-rr: W3C trace-id, 16 bytes as lowercase hex */
-+#define TRACE_ID_LEN    32
++/* pgbouncer-rr: W3C traceparent, 00-<32 hex trace-id>-<16 hex parent-id>-<2 hex flags> */
++#define TRACEPARENT_LEN 55
 +
  /*
   * Some cloud services use very long generated passwords, so give it
@@ -126,8 +126,8 @@ index 88ea46e..627a729 100644
  	usec_t xact_start;	/* client: xact start moment */
  	usec_t wait_start;	/* client: waiting start moment */
  
-+	/* pgbouncer-rr: trace id from the last routed query's traceparent, or "" */
-+	char trace_id[TRACE_ID_LEN + 1];
++	/* pgbouncer-rr: traceparent of the last routed query, or "" */
++	char traceparent[TRACEPARENT_LEN + 1];
 +
  	uint8_t cancel_key[BACKENDKEY_LEN];	/* client: generated, server: remote */
  	struct StatList canceling_clients;	/* clients trying to cancel the query on this connection */
