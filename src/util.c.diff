@@ -1,8 +1,8 @@
 diff --git a/src/util.c b/src/util.c
-index b280a7e..d60476a 100644
+index b280a7e..94e5298 100644
 --- a/src/util.c
 +++ b/src/util.c
-@@ -32,6 +32,33 @@
+@@ -32,13 +32,42 @@
  #include <openssl/evp.h>
  #endif
  
@@ -36,7 +36,52 @@ index b280a7e..d60476a 100644
  int log_socket_prefix(enum LogLevel lev, void *ctx, char *dst, unsigned int dstlen)
  {
  	const struct PgSocket *sock = ctx;
-@@ -539,3 +566,221 @@ bool check_reserved_database(const char *value)
++	const struct PgSocket *client;
+ 	const char *user, *db, *host;
+ 	char host6[PGADDR_BUF];
+ 	int peer_id;
+ 	int port;
++	int n;
+ 	char stype;
+ 
+ 	/* no prefix */
+@@ -65,19 +94,27 @@ int log_socket_prefix(enum LogLevel lev, void *ctx, char *dst, unsigned int dstl
+ 
+ 	if (pga_family(&sock->remote_addr) == AF_INET6) {
+ 		if (peer_id) {
+-			return snprintf(dst, dstlen, "%c-%p: peer-%d@[%s]:%d ",
+-					stype, sock, peer_id, host, port);
++			n = snprintf(dst, dstlen, "%c-%p: peer-%d@[%s]:%d ",
++				     stype, sock, peer_id, host, port);
++		} else {
++			n = snprintf(dst, dstlen, "%c-%p: %s/%s@[%s]:%d ",
++				     stype, sock, db, user, host, port);
+ 		}
+-		return snprintf(dst, dstlen, "%c-%p: %s/%s@[%s]:%d ",
+-				stype, sock, db, user, host, port);
+ 	} else {
+ 		if (peer_id) {
+-			return snprintf(dst, dstlen, "%c-%p: peer-%d@%s:%d ",
+-					stype, sock, peer_id, host, port);
++			n = snprintf(dst, dstlen, "%c-%p: peer-%d@%s:%d ",
++				     stype, sock, peer_id, host, port);
++		} else {
++			n = snprintf(dst, dstlen, "%c-%p: %s/%s@%s:%d ",
++				     stype, sock, db, user, host, port);
+ 		}
+-		return snprintf(dst, dstlen, "%c-%p: %s/%s@%s:%d ",
+-				stype, sock, db, user, host, port);
+ 	}
++
++	/* pgbouncer-rr: tag the line with the trace of the client's last routed query */
++	client = is_server_socket(sock) ? sock->link : sock;
++	if (n >= 0 && (unsigned) n < dstlen && client && client->trace_id[0])
++		n += snprintf(dst + n, dstlen - n, "trace=%s ", client->trace_id);
++	return n;
+ }
+ 
+ const char *bin2hex(const uint8_t *src, unsigned srclen, char *dst, unsigned dstlen)
+@@ -539,3 +576,221 @@ bool check_reserved_database(const char *value)
  	}
  	return true;
  }

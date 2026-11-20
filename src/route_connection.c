@@ -47,6 +47,55 @@ bool packet_query(PktHdr *pkt, const char **stmt, const char **query, struct MBu
 	return true;
 }
 
+static bool is_lower_hex(const char *s, size_t n)
+{
+	size_t i;
+
+	/* stops at the terminating NUL, which is not a hex digit */
+	for (i = 0; i < n; i++) {
+		if (!((s[i] >= '0' && s[i] <= '9') || (s[i] >= 'a' && s[i] <= 'f')))
+			return false;
+	}
+	return true;
+}
+
+/*
+ * capture_trace_id: remember the trace-id of a sqlcommenter W3C traceparent
+ * in the query, so that log lines for this client (and its linked server)
+ * can be matched to the application's trace:
+ *	traceparent='00-<32 hex trace-id>-<16 hex parent-id>-<2 hex flags>'
+ * sqlcommenter appends its comment to the query, so the last occurrence wins.
+ * The id is cleared when the query has no valid traceparent, so it never
+ * carries over from an earlier query.
+ */
+static void capture_trace_id(PgSocket *client, const char *query)
+{
+	static const char key[] = "traceparent='";
+	const char *p, *v = NULL;
+
+	client->trace_id[0] = '\0';
+	for (p = strstr(query, key); p != NULL; p = strstr(p + 1, key))
+		v = p + sizeof(key) - 1;
+	if (v == NULL)
+		return;
+
+	/*
+	 * 00-<trace-id>-<parent-id>-<flags>' at offsets 0, 3, 36, 53 and 55.
+	 * Each check stops at the end of the string, so none reads past it.
+	 */
+	if (!(v[0] == '0' && v[1] == '0' && v[2] == '-'
+	      && is_lower_hex(v + 3, TRACE_ID_LEN) && v[35] == '-'
+	      && is_lower_hex(v + 36, 16) && v[52] == '-'
+	      && is_lower_hex(v + 53, 2) && v[55] == '\''))
+		return;
+	/* an all-zero trace-id is invalid */
+	if (strspn(v + 3, "0") >= TRACE_ID_LEN)
+		return;
+
+	memcpy(client->trace_id, v + 3, TRACE_ID_LEN);
+	client->trace_id[TRACE_ID_LEN] = '\0';
+}
+
 /* route_client_connection:
  *  - applied to complete packets of type PqMsg_Query (Query) and PqMsg_Parse (Prepare) only
  *  - apply routing rules to the query string and determine the target database
@@ -65,9 +114,11 @@ bool route_client_connection(PgSocket *client, int in_transaction, PktHdr *pkt) 
 		return true;
 
 	if (!packet_query(pkt, &stmt_str, &query_str, NULL)) {
+		client->trace_id[0] = '\0';
 		disconnect_client(client, true, "malformed %c packet", pkt->type);
 		return false;
 	}
+	capture_trace_id(client, query_str);
 
 	slog_debug(client, "route_client_connection: Username => %s", client->login_user_credentials->name);
 	slog_debug(client, "route_client_connection: Query => %s", query_str);
@@ -76,6 +127,8 @@ bool route_client_connection(PgSocket *client, int in_transaction, PktHdr *pkt) 
 			"routing_rules");
 	if (dbname == NULL) {
 		slog_debug(client, "routing_rules returned 'None' - existing connection preserved");
+		if (cf_log_routing)
+			slog_info(client, "routing: no key returned, stayed on <%s>", client->pool->db->name);
 		return true;
 	}
 
@@ -130,9 +183,13 @@ bool route_client_connection(PgSocket *client, int in_transaction, PktHdr *pkt) 
                 statlist_remove(&client->pool->active_client_list, &client->head);
                 statlist_append(&pool->active_client_list, &client->head);
 
+		if (cf_log_routing)
+			slog_info(client, "routing: switched from <%s> to <%s>", client->pool->db->name, dbname);
 		client->pool = pool;
 	} else {
 		slog_debug(client, "already connected to pool <%s>", dbname);
+		if (cf_log_routing)
+			slog_info(client, "routing: stayed on <%s>", dbname);
 	}
 	free(dbname);
 	return true;
