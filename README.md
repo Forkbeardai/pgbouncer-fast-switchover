@@ -38,6 +38,7 @@ The file should contain the following Python function:
 - The function return value must be a valid database key name (dbkey) as specified in the configuration file, or `None`:
   - When a valid dbkey is returned by the routing function, the client connection will be routed to a connection in the specified server connection pool. 
   - When `None` is returned by the routing function, the client remains routed to its current server connection.   
+  - When the returned dbkey is not in the configuration, the client is disconnected with `unknown database key <dbkey>`. It is not left on its current pool, which may belong to another database.
 
 The route function is called only for query and prepare packets, with the following restrictions: 
 
@@ -130,9 +131,9 @@ The file should contain the python function:
   
 Implementing a query rewrite function is straightforward when the incoming application queries have fixed formats that are easily detectable and easily manipulated, perhaps using regular expression search/replace logic in the Python function. It is much more challenging to build a robust rewrite function to handle SQL statements with arbitrary format and complexity.  
 
-Enabling the query rewrite function triggers pgbouncer-fast-switchover to enforce that a complete query is contained in the incoming client socket buffer. Long queries are often split across multiple network packets; they should all be in the buffer before the rewrite function is called. This requires that the buffer size be large enough to accommodate the largest query. The default buffer size (2048) is likely too small, so specify a much larger size in the configuration: `pkt_buf = 32768`  
+Routing and rewrite both see the complete query, including a routing comment at its end. A query larger than `pkt_buf` is buffered whole before the functions are called, as pgbouncer does for prepared statements, so `pkt_buf` does not limit query size. The rewritten query may be any length.
 
-If a partially received query is detected, and there is room in the buffer for the remainder of the query, pgbouncer-fast-switchover waits for the remaining packets to be received before processing the query. If the buffer is not large enough for the incoming query, or if it is not large enough to hold the re-written query (which may be longer than the original), then the rewrite function will fail. By default, the failure is logged, and the original query string will be passed to the server unchanged. You can force the client connection to terminate instead, by setting:  `rewrite_query_disconnect_on_failure = true`.  
+A malformed Query or Parse packet disconnects the client. `rewrite_query_disconnect_on_failure` is still accepted in the configuration, but it is ignored: no rewrite falls back to sending the original query.  
 
  
 #### Simple Query Rewrite Example
