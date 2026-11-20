@@ -117,13 +117,13 @@ You will most likely want to implement more robust and sophisticated rules, taki
 Set `log_routing = 1` to log one line per routed query:
 
 ```
-LOG C-0x...: db1/app@10.0.0.5:51234 trace=4bf92f3577b34da6a3ce929d0e0e4736 routing: switched from <db1> to <db2>
-LOG C-0x...: db2/app@10.0.0.5:51234 trace=4bf92f3577b34da6a3ce929d0e0e4736 routing: stayed on <db2>
+LOG C-0x...: db1/app@10.0.0.5:51234 traceparent=00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01 routing: switched from <db1> to <db2>
+LOG C-0x...: db2/app@10.0.0.5:51234 traceparent=00-4bf92f3577b34da6a3ce929d0e0e4736-b7ad6b7169203331-01 routing: stayed on <db2>
 ```
 
 It is off by default because it logs every Query and Parse message.
 
-When routing is enabled, PgBouncer looks for a W3C trace context in the query's [sqlcommenter](https://google.github.io/sqlcommenter/) comment, `traceparent='00-<trace-id>-<parent-id>-<flags>'`, and adds `trace=<trace-id>` to the prefix of every log line for that client and its linked server connection: routing decisions and errors, pool waits, server disconnects. The id is replaced (or cleared) by the client's next query, and the last `traceparent` in the query wins. Search your logs for the trace id from your APM to see what PgBouncer did with that request. Your routing function does not need to log the query itself.
+When routing is enabled, PgBouncer looks for a W3C trace context in the query's [sqlcommenter](https://google.github.io/sqlcommenter/) comment, `traceparent='00-<trace-id>-<parent-id>-<flags>'`, and adds `traceparent=<traceparent>` to the prefix of every log line for that client and its linked server connection: routing decisions and errors, pool waits, server disconnects. The value is replaced (or cleared) by the client's next query, and the last `traceparent` in the query wins. A traceparent with an all-zero trace-id or parent-id is ignored. Split it on `-` in your log pipeline to get the trace id and the span (parent) id, then search for them from your APM to see what PgBouncer did with that request. Your routing function does not need to log the query itself.
 
 
 ## Query Rewrite

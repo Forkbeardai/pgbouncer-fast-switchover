@@ -1,5 +1,5 @@
 diff --git a/src/util.c b/src/util.c
-index b280a7e..94e5298 100644
+index b280a7e..8ced685 100644
 --- a/src/util.c
 +++ b/src/util.c
 @@ -32,13 +32,42 @@
@@ -75,8 +75,8 @@ index b280a7e..94e5298 100644
 +
 +	/* pgbouncer-rr: tag the line with the trace of the client's last routed query */
 +	client = is_server_socket(sock) ? sock->link : sock;
-+	if (n >= 0 && (unsigned) n < dstlen && client && client->trace_id[0])
-+		n += snprintf(dst + n, dstlen - n, "trace=%s ", client->trace_id);
++	if (n >= 0 && (unsigned) n < dstlen && client && client->traceparent[0])
++		n += snprintf(dst + n, dstlen - n, "traceparent=%s ", client->traceparent);
 +	return n;
  }
  
