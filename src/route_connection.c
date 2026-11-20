@@ -99,6 +99,22 @@ bool route_client_connection(PgSocket *client, int in_transaction, PktHdr *pkt) 
 	creds = db->forced_user_credentials ? db->forced_user_credentials : client->login_user_credentials;
 	pool = get_pool(db, creds);
 	if (client->pool != pool) {
+		/*
+		 * The server can only be handed back while it is idle outside a
+		 * transaction (release_server asserts this). Otherwise the client is
+		 * mid-transaction or has requests in flight on the current database,
+		 * and moving it would split that work across two backends. Refuse;
+		 * disconnecting closes the unclean server, which rolls the
+		 * transaction back.
+		 */
+		if (client->link != NULL && !client->link->ready) {
+			slog_error(client, "refusing to switch from <%s> to <%s> inside a transaction",
+				   client->pool->db->name, dbname);
+			disconnect_client(client, true, "cannot switch database inside a transaction: <%s> to <%s>",
+					  client->pool->db->name, dbname);
+			free(dbname);
+			return false;
+		}
 		if (client->link != NULL) {
 			/* release existing server connection back to pool */
 			slog_debug(client, "releasing existing server connection");

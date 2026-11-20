@@ -39,12 +39,13 @@ The file should contain the following Python function:
   - When a valid dbkey is returned by the routing function, the client connection will be routed to a connection in the specified server connection pool. 
   - When `None` is returned by the routing function, the client remains routed to its current server connection.   
   - When the returned dbkey is not in the configuration, the client is disconnected with `unknown database key <dbkey>`. It is not left on its current pool, which may belong to another database.
+  - A dbkey for a different pool is only honored while the client's server connection is idle outside a transaction. Inside a transaction (or with requests still in flight), the client is disconnected with `cannot switch database inside a transaction: <old> to <new>`, and its server connection is closed, which rolls the transaction back.
 
 The route function is called only for query and prepare packets, with the following restrictions: 
 
 - All queries must run wholly on the assigned server; cross-server joins do not work  
 - Ideally queries should autocommit each statement. Set `pool_mode = statement` in the configuration.
-- Multi-statement transactions will work correctly only if statements are not rerouted by the routing_rules function to a different server pool mid-transaction. Set `pool_mode = transaction` in the configuration.
+- Multi-statement transactions must stay on one server pool. Rerouting mid-transaction disconnects the client (see above). Set `pool_mode = transaction` in the configuration.
 - If your application uses database catalog tables to discover the schema, then the routing_rules function should direct catalog table queries to a database server that has all the relevant schema objects created.   
 
 
