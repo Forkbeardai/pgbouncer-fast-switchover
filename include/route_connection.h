@@ -15,6 +15,10 @@ This file is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS O
  * applied to client query.
  */
 
+struct MBuf;
+
 bool route_client_connection (PgSocket *client, int in_transaction, PktHdr *pkt);
+bool is_routing_enabled(void);
+bool packet_query(PktHdr *pkt, const char **stmt, const char **query, struct MBuf *rest);
 
 

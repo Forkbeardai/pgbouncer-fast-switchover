@@ -14,7 +14,14 @@ This file is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS O
  * pgbouncer-rr extension: client connection rewriting
  */
 
-bool rewrite_query(PgSocket *client, int in_transaction, PktHdr *pkt);
+typedef enum {
+	REWRITE_DONE,		/* carry on with pkt, rewritten or not */
+	REWRITE_REFETCH,	/* pkt is being re-read for rewriting; return true */
+	REWRITE_FAILED,		/* client was disconnected; return false */
+} RewriteResult;
+
+RewriteResult rewrite_query(PgSocket *client, int in_transaction, PktHdr *pkt);
+bool is_rewrite_enabled(PgSocket *client);
 
 
 void printHex(void *buffer, const unsigned int n) ;

@@ -19,67 +19,74 @@ This file is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS O
 #include "bouncer.h"
 #include <usual/pgutil.h>
 
-/* private function prototypes */
-char *call_python_routing_rules(PgSocket *client, char *query_str, int in_transaction);
+/*
+ * packet_query: point *stmt (Parse only) and *query at the strings in a
+ * complete Query or Parse packet. The strings live in pkt's buffer, which the
+ * caller must not change while using them. Returns false if the packet is
+ * malformed.
+ *	PqMsg_Query | int32 len | str query
+ *	PqMsg_Parse | int32 len | str stmt | str query | int16 numparams | int32 paramoid...
+ */
+bool packet_query(PktHdr *pkt, const char **stmt, const char **query, struct MBuf *rest)
+{
+	struct MBuf body;
+
+	Assert(!incomplete_pkt(pkt));
+	if (pkt->len < NEW_HEADER_LEN)
+		return false;
+	/* pkt->data can run past this packet in the iobuf, so bound it to pkt->len */
+	mbuf_init_fixed_reader(&body, mbuf_data(&pkt->data), pkt->len);
+	body.read_pos = NEW_HEADER_LEN;
+	*stmt = "";
+	if (pkt->type == PqMsg_Parse && !mbuf_get_string(&body, stmt))
+		return false;
+	if (!mbuf_get_string(&body, query))
+		return false;
+	if (rest)
+		*rest = body;
+	return true;
+}
 
 /* route_client_connection:
- *  - applied to packets of type PqMsg_Query (Query) and PqMsg_Parse (Prepare) only
- *  - apply routing rules to query string contained in the buffer, and determine target database
- *  - locate connection pool for target database to client object, and return
+ *  - applied to complete packets of type PqMsg_Query (Query) and PqMsg_Parse (Prepare) only
+ *  - apply routing rules to the query string and determine the target database
+ *  - move the client to that database's pool
+ * Returns false if the client was disconnected.
  */
 bool route_client_connection(PgSocket *client, int in_transaction, PktHdr *pkt) {
-	SBuf *sbuf = &client->sbuf;
-	char *pkt_start;
-	char *query_str;
+	const char *stmt_str;
+	const char *query_str;
 	char *dbname;
 	PgDatabase *db;
 	PgPool *pool;
 	PgCredentials *creds;
 
-	/* extract query string from packet */
-	/* first byte is the packet type (which we already know)
-	 * next 4 bytes is the packet length
-	 * For packet type PqMsg_Query, the query string is next
-	 * 	PqMsg_Query | int32 len | str query
-	 * For packet type PqMsg_Parse, the query string is after the stmt string
-	 * 	PqMsg_Parse | int32 len | str stmt | str query | int16 numparams | int32 paramoid
-	 * (Ref: https://www.pgcon.org/2014/schedule/attachments/330_postgres-for-the-wire.pdf)
-	 */
+	if (!is_routing_enabled())
+		return true;
 
-	pkt_start = (char *) &sbuf->io->buf[sbuf->io->parse_pos];
-	/* printHex(pkt_start, pkt->len); */
-
-	if (pkt->type == PqMsg_Query) {
-		query_str = (char *) pkt_start + 5;
-	} else if (pkt->type == PqMsg_Parse) {
-		char *stmt_str = pkt_start + 5;
-		query_str = stmt_str + strlen(stmt_str) + 1;
-	} else {
-		fatal("Invalid packet type - expected Q or P, got %c", pkt->type);
+	if (!packet_query(pkt, &stmt_str, &query_str, NULL)) {
+		disconnect_client(client, true, "malformed %c packet", pkt->type);
+		return false;
 	}
 
 	slog_debug(client, "route_client_connection: Username => %s", client->login_user_credentials->name);
 	slog_debug(client, "route_client_connection: Query => %s", query_str);
 
-	if (strcmp(cf_routing_rules_py_module_file, "not_enabled") == 0) {
-		slog_debug(client,
-				"Query routing not enabled in config (routing_rules_py_module_file)");
-		return true;
-	}
-
-	dbname = pycall(client, client->login_user_credentials->name, query_str, in_transaction, cf_routing_rules_py_module_file,
+	dbname = pycall(client, client->login_user_credentials->name, (char *) query_str, in_transaction, cf_routing_rules_py_module_file,
 			"routing_rules");
 	if (dbname == NULL) {
 		slog_debug(client, "routing_rules returned 'None' - existing connection preserved");
-		return false;
+		return true;
 	}
 
 	db = find_database(dbname);
 	if (db == NULL) {
-		slog_error(client,
-				"nonexistent database key <%s> returned by routing_rules",
-				dbname);
-		slog_error(client, "check ini and/or routing rules function");
+		/*
+		 * Fail closed: staying on the current pool would run this query
+		 * against whichever database the connection last used.
+		 */
+		slog_error(client, "nonexistent database key <%s> returned by routing_rules", dbname);
+		disconnect_client(client, true, "unknown database key <%s>", dbname);
 		free(dbname);
 		return false;
 	}
@@ -92,6 +99,22 @@ bool route_client_connection(PgSocket *client, int in_transaction, PktHdr *pkt) 
 	creds = db->forced_user_credentials ? db->forced_user_credentials : client->login_user_credentials;
 	pool = get_pool(db, creds);
 	if (client->pool != pool) {
+		/*
+		 * The server can only be handed back while it is idle outside a
+		 * transaction (release_server asserts this). Otherwise the client is
+		 * mid-transaction or has requests in flight on the current database,
+		 * and moving it would split that work across two backends. Refuse;
+		 * disconnecting closes the unclean server, which rolls the
+		 * transaction back.
+		 */
+		if (client->link != NULL && !client->link->ready) {
+			slog_error(client, "refusing to switch from <%s> to <%s> inside a transaction",
+				   client->pool->db->name, dbname);
+			disconnect_client(client, true, "cannot switch database inside a transaction: <%s> to <%s>",
+					  client->pool->db->name, dbname);
+			free(dbname);
+			return false;
+		}
 		if (client->link != NULL) {
 			/* release existing server connection back to pool */
 			slog_debug(client, "releasing existing server connection");
@@ -115,3 +138,7 @@ bool route_client_connection(PgSocket *client, int in_transaction, PktHdr *pkt) 
 	return true;
 }
 
+
+bool is_routing_enabled(void) {
+	return strcmp(cf_routing_rules_py_module_file, "not_enabled") != 0;
+}

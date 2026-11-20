@@ -1,5 +1,5 @@
 diff --git a/src/client.c b/src/client.c
-index 7446f70..6267f33 100644
+index 7446f70..52cef8d 100644
 --- a/src/client.c
 +++ b/src/client.c
 @@ -529,6 +529,32 @@ static bool check_if_need_ldap_authentication(PgSocket *client, const char *dbna
@@ -43,7 +43,29 @@ index 7446f70..6267f33 100644
  
  	switch (pkt->type) {
  	/* one-packet queries */
-@@ -1642,8 +1669,11 @@ static bool handle_client_work(PgSocket *client, PktHdr *pkt)
+@@ -1635,6 +1662,21 @@ static bool handle_client_work(PgSocket *client, PktHdr *pkt)
+ 		}
+ 	}
+ 
++	/*
++	 * pgbouncer-rr: routing and rewrite read the whole query, and the
++	 * routing comment usually trails it, so wait for the complete packet.
++	 */
++	if ((pkt->type == PqMsg_Query || pkt->type == PqMsg_Parse)
++	    && !client->pool->db->admin
++	    && (is_routing_enabled() || is_rewrite_enabled(client))
++	    && incomplete_pkt(pkt)) {
++		if (pkt->len > (unsigned) cf_sbuf_len) {
++			client->packet_cb_state.flag = CB_WANT_COMPLETE_PACKET;
++			sbuf_prepare_fetch(sbuf, pkt->len);
++			return true;
++		}
++		return false;
++	}
+ 
+ 	/* update stats */
+ 	if (!client->query_start) {
+@@ -1642,8 +1684,11 @@ static bool handle_client_work(PgSocket *client, PktHdr *pkt)
  		client->query_start = get_cached_time();
  	}
  
@@ -56,16 +78,22 @@ index 7446f70..6267f33 100644
  		client->pool->stats.xact_count++;
  		client->xact_start = client->query_start;
  	}
-@@ -1651,6 +1681,14 @@ static bool handle_client_work(PgSocket *client, PktHdr *pkt)
+@@ -1651,6 +1696,20 @@ static bool handle_client_work(PgSocket *client, PktHdr *pkt)
  	if (client->pool->db->admin)
  		return admin_handle_client(client, pkt);
  
 +	/* pgbouncer-rr extensions: query rewrite & client connection routing */
 +	if (pkt->type == PqMsg_Query || pkt->type == PqMsg_Parse) {
-+		if (!rewrite_query(client, in_transaction, pkt)) {
++		switch (rewrite_query(client, in_transaction, pkt)) {
++		case REWRITE_REFETCH:
++			return true;
++		case REWRITE_FAILED:
 +			return false;
++		case REWRITE_DONE:
++			break;
 +		}
-+		route_client_connection(client, in_transaction, pkt);
++		if (!route_client_connection(client, in_transaction, pkt))
++			return false;
 +	}
 +
  	/* acquire server */

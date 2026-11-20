@@ -18,143 +18,116 @@ This file is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS O
 #include "bouncer.h"
 #include <usual/pgutil.h>
 
-typedef enum {
-  kIncompletePacketDecisionContinue = 0,
-  kIncompletePacketDecisionDisable = 1,
-  kIncompletePacketDecisionDefer = 2,
-} IncompletePacketDecision;
-
 /* private function prototypes */
-char *call_python_rewrite_query(PgSocket *client, char *query_str, int in_transaction);
 void printHex(void *buffer, const unsigned int n);
-char *strip_newlines(char *s);
-bool is_rewrite_enabled(PgSocket *client);
-IncompletePacketDecision handle_incomplete_packet(PgSocket *client, PktHdr *pkt);
-IncompletePacketDecision handle_failure(PgSocket *client);
-char *tag_rewritten(char *query);
-bool is_rewritten(char *query);
+char *strip_newlines(const char *s);
+char *tag_rewritten(const char *query);
+bool is_rewritten(const char *query);
+static bool replace_query(PktHdr *pkt, const char *stmt_str, const char *query_str, struct MBuf *rest);
 
 /* rewrite_query:
- * applied to packets of type PqMsg_Query (Query) and PqMsg_Parse (Prepare) only
+ * applied to complete packets of type PqMsg_Query (Query) and PqMsg_Parse (Prepare) only
  */
-bool rewrite_query(PgSocket *client, int in_transaction, PktHdr *pkt) {
-	SBuf *sbuf = &client->sbuf;
-	char *pkt_start;
-	char *stmt_str="", *query_str, *loggable_query_str, *tmp_new_query_str, *new_query_str;
-	char *new_io_buf;
-	char *remaining_buffer_ptr;
-	int new_pkt_len, remaining_buffer_len;
-	int i;
+RewriteResult rewrite_query(PgSocket *client, int in_transaction, PktHdr *pkt) {
+	const char *stmt_str, *query_str;
+	struct MBuf rest;
+	char *loggable_query_str, *tmp_new_query_str, *new_query_str;
 
-	if (!is_rewrite_enabled(client)) return true;
-	switch (handle_incomplete_packet(client, pkt)) {
-	case kIncompletePacketDecisionDisable:
-	    return true;
-	case kIncompletePacketDecisionDefer:
-	    return false;
-	case kIncompletePacketDecisionContinue:
-	    ;  // no-op
-	}
+	if (!is_rewrite_enabled(client))
+		return REWRITE_DONE;
 
-	/* extract query string from packet */
-	/* first byte is the packet type (which we already know)
-	 * next 4 bytes is the packet length
-	 * For packet type PqMsg_Query, the query string is next
-	 * 	PqMsg_Query | int32 len | str query
-	 * For packet type PqMsg_Parse, the query string is after the stmt string
-	 * 	PqMsg_Parse | int32 len | str stmt | str query | int16 numparams | int32 paramoid
-	 * (Ref: https://www.pgcon.org/2014/schedule/attachments/330_postgres-for-the-wire.pdf)
-	 */
-	pkt_start = (char *) &sbuf->io->buf[sbuf->io->parse_pos];
-	if (pkt->type == PqMsg_Query) {
-		query_str = (char *) pkt_start + 5;
-	} else if (pkt->type == PqMsg_Parse) {
-		stmt_str = pkt_start + 5;
-		query_str = stmt_str + strlen(stmt_str) + 1;
-	} else {
-		fatal("Invalid packet type - expected PqMsg_Query or PqMsg_Parse, got %c", pkt->type);
+	if (!packet_query(pkt, &stmt_str, &query_str, &rest)) {
+		disconnect_client(client, true, "malformed %c packet", pkt->type);
+		return REWRITE_FAILED;
 	}
 
 	/* don't process same query again */
-	if (is_rewritten(query_str)) return true;
+	if (is_rewritten(query_str))
+		return REWRITE_DONE;
 
-    if (unlikely(cf_verbose > 0)) {
-	    loggable_query_str = strip_newlines(query_str) ;
-	    slog_debug(client, "rewrite_query: Username => %s", client->login_user_credentials->name);
-	    slog_debug(client, "rewrite_query: Orig Query=> %s", loggable_query_str);
-	    free(loggable_query_str);
+	if (unlikely(cf_verbose > 0)) {
+		loggable_query_str = strip_newlines(query_str);
+		slog_debug(client, "rewrite_query: Username => %s", client->login_user_credentials->name);
+		slog_debug(client, "rewrite_query: Orig Query=> %s", loggable_query_str);
+		free(loggable_query_str);
 	}
 
 	/* call python function to rewrite the query */
-	tmp_new_query_str = pycall(client, client->login_user_credentials->name, query_str, in_transaction, cf_rewrite_query_py_module_file,
-			"rewrite_query");
-	if (tmp_new_query_str == NULL) {
+	tmp_new_query_str = pycall(client, client->login_user_credentials->name, (char *) query_str, in_transaction,
+			cf_rewrite_query_py_module_file, "rewrite_query");
+	if (tmp_new_query_str == NULL || strcmp(tmp_new_query_str, query_str) == 0) {
 		slog_debug(client, "query unchanged");
-		return true;
+		free(tmp_new_query_str);
+		return REWRITE_DONE;
 	}
+
+	if (client->packet_cb_state.flag != CB_HANDLE_COMPLETE_PACKET) {
+		/*
+		 * The packet is in the client's iobuf, which is shared with any
+		 * pipelined packets after it and can't grow. Have sbuf hand it to
+		 * us again in the client's own packet buffer, where we can resize
+		 * it; handle_client_work runs again with that copy.
+		 */
+		free(tmp_new_query_str);
+		client->packet_cb_state.flag = CB_WANT_COMPLETE_PACKET;
+		sbuf_prepare_fetch(&client->sbuf, pkt->len);
+		return REWRITE_REFETCH;
+	}
+	Assert(pkt == &client->packet_cb_state.pkt);
+
 	new_query_str = tag_rewritten(tmp_new_query_str);
 	free(tmp_new_query_str);
-	loggable_query_str = strip_newlines(new_query_str) ;
-	slog_debug(client, "rewrite_query: New => %s", loggable_query_str);
-	free(loggable_query_str);
+	if (unlikely(cf_verbose > 0)) {
+		loggable_query_str = strip_newlines(new_query_str);
+		slog_debug(client, "rewrite_query: New => %s", loggable_query_str);
+		free(loggable_query_str);
+	}
 
-	/* new query must fit in the buffer */
-	if ((int)(sbuf->io->recv_pos + strlen(new_query_str) - strlen(query_str)) > (int)cf_sbuf_len) {
-		slog_error(client,
-				"Rewritten query will not fit into the allocated buffer!");
+	if (!replace_query(pkt, stmt_str, new_query_str, &rest)) {
 		free(new_query_str);
-		switch (handle_failure(client)) {
-		case kIncompletePacketDecisionDisable:
-		case kIncompletePacketDecisionContinue:
-		    return true;
-		case kIncompletePacketDecisionDefer:
-		    return false;
-		}
+		disconnect_client(client, true, "out of memory");
+		return REWRITE_FAILED;
 	}
-
-	/* manipulate the buffer to replace query */
-	/* clone buffer */
-	new_io_buf = malloc(cf_sbuf_len);
-	if (new_io_buf == NULL) {
-		fatal_perror("malloc");
-	}
-	memcpy(new_io_buf, sbuf->io->buf, cf_sbuf_len);
-	i = sbuf->io->parse_pos;
-	/* packet type */
-	new_io_buf[i++] = pkt->type;
-	/* packet length */
-	new_pkt_len = pkt->len + strlen(new_query_str) - strlen(query_str) - 1;
-	new_io_buf[i++] = (new_pkt_len >> 24) & 255;
-	new_io_buf[i++] = (new_pkt_len >> 16) & 255;
-	new_io_buf[i++] = (new_pkt_len >> 8) & 255;
-	new_io_buf[i++] = new_pkt_len & 255;
-	/* statement str - for type P */
-	if (pkt->type == PqMsg_Parse) {
-		strcpy(&new_io_buf[i], stmt_str);
-		i += strlen(stmt_str) + 1;
-	}
-	/* query string */
-	strcpy(&new_io_buf[i], new_query_str);
-	i += strlen(new_query_str) + 1;
-	/* copy everything else in buffer */
-	remaining_buffer_ptr = query_str + strlen(query_str) + 1;
-	remaining_buffer_len = (char *) &sbuf->io->buf[sbuf->io->recv_pos]
-			- remaining_buffer_ptr;
-	memcpy(&new_io_buf[i], remaining_buffer_ptr, remaining_buffer_len);
-	i += remaining_buffer_len;
-	/* replace original buffer with new buffer */
-	memcpy(sbuf->io->buf, new_io_buf, i);
-	/* adjust buffer recv_pos index to new position */
-	sbuf->io->recv_pos = i;
-	/* update PktHdr structure */
-	pkt->len = new_pkt_len + 1;
-	iobuf_parse_all(sbuf->io, &pkt->data);
-	/* done */
 	free(new_query_str);
-	free(new_io_buf);
-	return true;
+	return REWRITE_DONE;
 }
 
+/*
+ * Rebuild pkt with query_str in place of its query. stmt_str and rest (the
+ * bytes after the query) may point into pkt's current buffer.
+ */
+static bool replace_query(PktHdr *pkt, const char *stmt_str, const char *query_str, struct MBuf *rest)
+{
+	struct MBuf buf;
+	size_t stmt_len = pkt->type == PqMsg_Parse ? strlen(stmt_str) + 1 : 0;
+	size_t query_len = strlen(query_str) + 1;
+	unsigned rest_len = mbuf_avail_for_read(rest);
+	size_t wire_len = 4 + stmt_len + query_len + rest_len;	/* excludes the type byte */
+	uint8_t hdr[NEW_HEADER_LEN];
+
+	if (wire_len > INT32_MAX)
+		return false;
+	hdr[0] = pkt->type;
+	hdr[1] = (wire_len >> 24) & 255;
+	hdr[2] = (wire_len >> 16) & 255;
+	hdr[3] = (wire_len >> 8) & 255;
+	hdr[4] = wire_len & 255;
+
+	mbuf_init_dynamic(&buf);
+	if (!mbuf_make_room(&buf, wire_len + 1)
+	    || !mbuf_write(&buf, hdr, sizeof(hdr))
+	    || !mbuf_write(&buf, stmt_str, stmt_len)
+	    || !mbuf_write(&buf, query_str, query_len)
+	    || !mbuf_write(&buf, (const uint8_t *) mbuf_data(rest) + rest->read_pos, rest_len)) {
+		mbuf_free(&buf);
+		return false;
+	}
+	mbuf_free(&pkt->data);
+	pkt->data = buf;
+	pkt->len = wire_len + 1;
+	pkt_rewind_v3(pkt);
+	return true;
+}
 
 /* rewrite enabled? */
 bool is_rewrite_enabled(PgSocket *client) {
@@ -165,54 +138,9 @@ bool is_rewrite_enabled(PgSocket *client) {
 	return true;
 }
 
-/* handle incomplete packet in the buffer
- *  - if buffer is too small, then either
- *     - continue without rewrite (if rewrite_query_disconnect_on_failure = false)
- *     - disconnect client (if rewrite_query_disconnect_on_failure = true)
- *  - if buffer is not too small, return false and allow main loop to wait for rest of packet
- */
-IncompletePacketDecision handle_incomplete_packet(PgSocket *client, PktHdr *pkt) {
-	if (incomplete_pkt(pkt)) {
-		slog_warning(client, "Unable to rewrite query - buffer does not contain full query packet");
-		slog_warning(client, "Buffer len -> %d, Pkt len -> %d", mbuf_written(&pkt->data), pkt->len);
-		/* is packet size bigger than the buffer size? */
-		if ((int)pkt->len > (int)cf_sbuf_len) {
-			/* Nope - we will never get the full packet */
-			slog_error(client, "Packet length (%d) bigger than buffer size (%d)", pkt->len, cf_sbuf_len);
-			slog_error(client, "Increase buffer size in config (pkt_buf) to contain the maximum sized query");
-			slog_error(client, "rewrite_query_disconnect_on_failure = %s", cf_rewrite_query_disconnect_on_failure);
-			return handle_failure(client);
-		} else {
-			/* there is room in the buffer - let's wait for rest of packet */
-			slog_warning(client, "Wait for rest of packet to arrive");
-			return kIncompletePacketDecisionDefer;
-		}
-	}
-	return kIncompletePacketDecisionContinue;
-}
-
-/*
- * Handle rewrite failure
- * Either continue with original query,
- * or disconnect client
- * based on rewrite_query_disconnect_on_failure setting
- */
-IncompletePacketDecision handle_failure(PgSocket *client) {
-	if (strcmp(cf_rewrite_query_disconnect_on_failure, "false") == 0) {
-		/* return true without rewriting query */
-		slog_error(client, "Preserving original query");
-		return kIncompletePacketDecisionDisable;
-	} else {
-		/* disconnect client */
-		slog_error(client, "Disconnecting client");
-		disconnect_client(client, false, "Rewrite Query failure - query too large for buffer - disconnecting");
-		return kIncompletePacketDecisionDefer;
-	}
-}
-
 /* copy query string with no newlines, so that it will print correctly in slog_ functions
  */
-char *strip_newlines(char *s) {
+char *strip_newlines(const char *s) {
 	char *n;
 	char *p1;
 	n = strdup(s);
@@ -230,44 +158,35 @@ char *strip_newlines(char *s) {
 #define rewritten_template "rewritten_pid='%05d'*/"
 
 /* query tagging to prevent multiple rewrite */
-char *tag_rewritten(char *query) {
-	char *tag = malloc(64);
+char *tag_rewritten(const char *query) {
+	char tag[64];
 	char *taggedQuery;
-	int len, offset;
-	if (tag == NULL) {
-		fatal_perror("malloc");
-	}
-    len = strlen(query);
-    if (len > 2 && query[len - 2] == '*' && query[len - 1] == '/') {
-	  tag[0] = ',';
-	  offset = 1;
+	size_t len = strlen(query);
+	size_t keep = len;
+
+	/* if the query ends in a block comment, add the tag to it as another key */
+	if (len >= 2 && query[len - 2] == '*' && query[len - 1] == '/') {
+		keep = len - 2;
+		snprintf(tag, sizeof(tag), "," rewritten_template, getpid());
 	} else {
-	  tag[0] = '/';
-	  tag[1] = '*';
-	  offset = 2;
+		snprintf(tag, sizeof(tag), "/*" rewritten_template, getpid());
 	}
-	sprintf(tag + offset, rewritten_template, getpid());
-	taggedQuery = malloc(strlen(tag) + strlen(query) + 1);
+	taggedQuery = malloc(keep + strlen(tag) + 1);
 	if (taggedQuery == NULL) {
 		fatal_perror("malloc");
 	}
-	strcpy(taggedQuery, query);
-	strcpy(taggedQuery + len - (2 - offset) * 2, tag);
-	free(tag);
+	memcpy(taggedQuery, query, keep);
+	strcpy(taggedQuery + keep, tag);
 	return taggedQuery;
 }
-bool is_rewritten(char *query) {
-	bool is_tagged = false;
-	char *tag = malloc(64);
-	if (tag == NULL) {
-		fatal_perror("malloc");
-	}
-	sprintf(tag, rewritten_template, getpid());
-	if (strstr(query + strlen(query) - strlen(tag), tag) == query){
-		is_tagged = true;
-	}
-	free(tag);
-	return is_tagged;
+
+bool is_rewritten(const char *query) {
+	char tag[64];
+	size_t len = strlen(query), tag_len;
+
+	snprintf(tag, sizeof(tag), rewritten_template, getpid());
+	tag_len = strlen(tag);
+	return len >= tag_len && strcmp(query + len - tag_len, tag) == 0;
 }
 
 /* Packet dump for debugging */
